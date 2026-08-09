@@ -4,7 +4,7 @@ A lightweight local gallery for Android. Developed entirely on mobile devices us
 
 # Tech Stack
 
-* **Language:** Java & Kotlin
+* **Languages:** Java & Kotlin
 * **Platform:** Android
 * **Development Environment:** Sketchware Pro (Add Source Directly / Custom Classes)
 
