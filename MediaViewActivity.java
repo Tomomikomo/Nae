@@ -14,9 +14,9 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
+import android.view.animation.DecelerateInterpolator;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
-import android.widget.LinearLayout;
 import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toolbar;
@@ -87,8 +87,12 @@ public class MediaViewActivity extends FragmentActivity {
     private ArrayList<MediaItem> activeList = new ArrayList<>();
     private int videoSavedPosition = -1;
     private boolean forceKeepPaused = false;
+    private boolean isTrashMode = false;
+    private boolean isAnimatingRemoval = false;
 
     private static final int REQ_DELETE_MEDIA = 200;
+    private static final int REQ_RESTORE_MEDIA = 201;
+    private static final int REQ_DELETE_PERM_MEDIA = 202;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -100,9 +104,12 @@ public class MediaViewActivity extends FragmentActivity {
         String startPath = getIntent().getStringExtra("media_path");
         activeTab = getIntent().getIntExtra("tab_index", 0);
         String albumPath = getIntent().getStringExtra("album_path");
+        isTrashMode = getIntent().getBooleanExtra("is_trash", false);
 
         activeList = new ArrayList<>();
-        if (albumPath != null && !albumPath.trim().isEmpty()) {
+        if (isTrashMode) {
+            activeList.addAll(TrashScanner.getTrashItems(this));
+        } else if (albumPath != null && !albumPath.trim().isEmpty()) {
             for (MediaItem mi : MediaScanner.allMediaList) {
                 File f = new File(mi.getPath());
                 if (f.exists() && f.getParentFile() != null && f.getParentFile().getAbsolutePath().equals(albumPath)) {
@@ -160,7 +167,7 @@ public class MediaViewActivity extends FragmentActivity {
         });
 
         try {
-            int layoutRes = getResources().getIdentifier("media_view_controls", "layout", pkg);
+            int layoutRes = getResources().getIdentifier(isTrashMode ? "trash_view_controls" : "media_view_controls", "layout", pkg);
             if (layoutRes != 0) {
                 controlsView = LayoutInflater.from(this).inflate(layoutRes, rootLayout, false);
                 FrameLayout.LayoutParams clp = new FrameLayout.LayoutParams(-1, -2);
@@ -168,7 +175,11 @@ public class MediaViewActivity extends FragmentActivity {
                 clp.setMargins(0, 0, 0, 48);
                 controlsView.setLayoutParams(clp);
                 rootLayout.addView(controlsView);
-                setupActionButtons(controlsView);
+                if (isTrashMode) {
+                    setupTrashActionButtons(controlsView);
+                } else {
+                    setupActionButtons(controlsView);
+                }
             }
         } catch(Exception e){}
 
@@ -179,6 +190,7 @@ public class MediaViewActivity extends FragmentActivity {
         viewPager.setPageTransformer(true, new ViewPager.PageTransformer() {
             @Override
             public void transformPage(View page, float position) {
+                if (isAnimatingRemoval) return;
                 if (position < -1) { page.setAlpha(0f); }
                 else if (position <= 0) { page.setAlpha(1f); page.setTranslationX(0f); page.setScaleX(1f); page.setScaleY(1f); }
                 else if (position <= 1) { page.setAlpha(1f - position); page.setTranslationX(-page.getWidth() * position); float sf = 0.75f + (1f - 0.75f) * (1f - Math.abs(position)); page.setScaleX(sf); page.setScaleY(sf); }
@@ -208,25 +220,58 @@ public class MediaViewActivity extends FragmentActivity {
     }
     
     private android.net.Uri getItemContentUri(MediaItem item) {
-        android.net.Uri baseUri = item.isVideo() ? android.provider.MediaStore.Video.Media.EXTERNAL_CONTENT_URI : android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
-        android.content.ContentResolver cr = getContentResolver();
-        android.database.Cursor cur = cr.query(baseUri, new String[]{"_id"}, android.provider.MediaStore.MediaColumns.DATA + "=?", new String[]{item.getPath()}, null);
-        android.net.Uri result = null;
-        if (cur != null) {
-            if (cur.moveToFirst()) {
-                long id = cur.getLong(cur.getColumnIndexOrThrow("_id"));
-                result = android.content.ContentUris.withAppendedId(baseUri, id);
-            }
-            cur.close();
+        return FileMethods.getItemContentUri(this, item.getPath(), item.isVideo());
+    }
+
+    private void setupTrashActionButtons(View controls) {
+        int restoreId = getResources().getIdentifier("btn_restore", "id", pkg);
+        int deletePermId = getResources().getIdentifier("btn_delete_perm", "id", pkg);
+
+        View btnRestore = controls.findViewById(restoreId);
+        View btnDeletePerm = controls.findViewById(deletePermId);
+
+        int[] attrs = new int[]{android.R.attr.selectableItemBackground};
+        android.content.res.TypedArray ta = obtainStyledAttributes(attrs);
+        android.graphics.drawable.Drawable ripple = ta.getDrawable(0);
+        ta.recycle();
+
+        if (btnRestore != null) {
+            btnRestore.setClickable(true); btnRestore.setFocusable(true);
+            if (ripple != null) btnRestore.setBackground(ripple.getConstantState().newDrawable());
+            btnRestore.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    try {
+                        int pos = viewPager.getCurrentItem();
+                        if (pos >= 0 && pos < activeList.size()) {
+                            MediaItem item = activeList.get(pos);
+                            java.util.ArrayList<String> pathsToRestore = new java.util.ArrayList<>();
+                            pathsToRestore.add(item.getPath());
+                            FileMethods.showRestoreConfirmationDialog(MediaViewActivity.this, pathsToRestore, REQ_RESTORE_MEDIA);
+                        }
+                    } catch (Exception e) {}
+                }
+            });
         }
-        if (result == null) {
-            try {
-                result = androidx.core.content.FileProvider.getUriForFile(this, getPackageName() + ".provider", new File(item.getPath()));
-            } catch (Exception e) {
-                result = android.net.Uri.fromFile(new File(item.getPath()));
-            }
+
+        if (btnDeletePerm != null) {
+            btnDeletePerm.setClickable(true); btnDeletePerm.setFocusable(true);
+            if (ripple != null) btnDeletePerm.setBackground(ripple.getConstantState().newDrawable());
+            btnDeletePerm.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    try {
+                        int pos = viewPager.getCurrentItem();
+                        if (pos >= 0 && pos < activeList.size()) {
+                            MediaItem item = activeList.get(pos);
+                            java.util.ArrayList<String> pathsToDelete = new java.util.ArrayList<>();
+                            pathsToDelete.add(item.getPath());
+                            FileMethods.showPermanentDeleteConfirmationDialog(MediaViewActivity.this, pathsToDelete, REQ_DELETE_PERM_MEDIA);
+                        }
+                    } catch (Exception e) {}
+                }
+            });
         }
-        return result;
     }
 
     private void setupActionButtons(View controls) {
@@ -319,7 +364,11 @@ public class MediaViewActivity extends FragmentActivity {
                             try {
                                 if (item.isVideo()) {
                                     android.media.MediaMetadataRetriever retriever = new android.media.MediaMetadataRetriever();
-                                    retriever.setDataSource(item.getPath());
+                                    try {
+                                        retriever.setDataSource(item.getPath());
+                                    } catch (Exception ex) {
+                                        retriever.setDataSource(MediaViewActivity.this, getItemContentUri(item));
+                                    }
                                     String width = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH);
                                     String height = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT);
                                     if (width != null && height != null) {
@@ -410,21 +459,74 @@ public class MediaViewActivity extends FragmentActivity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == REQ_DELETE_MEDIA && resultCode == RESULT_OK) { 
-            int pos = viewPager.getCurrentItem();
-            if (pos >= 0 && pos < activeList.size()) {
-                handleLocalFileDeleted(pos);
+        if (resultCode == RESULT_OK) {
+            if (requestCode == REQ_DELETE_MEDIA || requestCode == REQ_RESTORE_MEDIA || requestCode == REQ_DELETE_PERM_MEDIA) {
+                int pos = viewPager.getCurrentItem();
+                if (pos >= 0 && pos < activeList.size()) {
+                    animateAndRemoveItem(pos);
+                }
             }
         }
+    }
+
+    private void animateAndRemoveItem(final int position) {
+        if (isAnimatingRemoval) return;
+        isAnimatingRemoval = true;
+
+        stopVideoPlaybackEngine();
+
+        final View currentView = viewPager.findViewWithTag(position);
+        final View nextView = viewPager.findViewWithTag(position + 1);
+
+        if (currentView == null) {
+            isAnimatingRemoval = false;
+            handleLocalFileDeleted(position);
+            return;
+        }
+
+        currentView.setPivotX(currentView.getWidth() / 2f);
+        currentView.setPivotY(currentView.getHeight() / 2f);
+
+        currentView.animate()
+                .scaleX(0f)
+                .scaleY(0f)
+                .alpha(0f)
+                .setDuration(300)
+                .setInterpolator(new DecelerateInterpolator())
+                .start();
+
+        if (nextView != null) {
+            float screenWidth = viewPager.getWidth();
+            nextView.setTranslationX(screenWidth);
+            nextView.animate()
+                    .translationX(0f)
+                    .setDuration(300)
+                    .setInterpolator(new DecelerateInterpolator())
+                    .start();
+        }
+
+        new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                currentView.setScaleX(1f);
+                currentView.setScaleY(1f);
+                currentView.setAlpha(1f);
+                if (nextView != null) {
+                    nextView.setTranslationX(0f);
+                }
+                
+                isAnimatingRemoval = false;
+                handleLocalFileDeleted(position);
+            }
+        }, 300);
     }
 
     private void handleLocalFileDeleted(int position) {
         try {
             if (position < 0 || position >= activeList.size()) return;
             MediaItem removedItem = activeList.remove(position);
-            pagerAdapter.notifyDataSetChanged();
             
-            if (removedItem != null) {
+            if (!isTrashMode && removedItem != null) {
                 String path = removedItem.getPath();
                 for (int i = MediaScanner.allMediaList.size() - 1; i >= 0; i--) {
                     if (MediaScanner.allMediaList.get(i).getPath().equals(path)) { MediaScanner.allMediaList.remove(i); break; }
@@ -440,6 +542,7 @@ public class MediaViewActivity extends FragmentActivity {
             if (activeList.isEmpty()) { 
                 finish(); 
             } else { 
+                pagerAdapter.notifyDataSetChanged();
                 viewPager.setAdapter(pagerAdapter); 
                 viewPager.setCurrentItem(Math.min(position, activeList.size() - 1), false); 
             }
@@ -468,6 +571,18 @@ public class MediaViewActivity extends FragmentActivity {
                 if (btnId != 0) playPauseBtn = (ImageView) videoLayoutOverlay.findViewById(btnId);
                 
                 if (controlsView != null) { controlsView.setVisibility(View.GONE); }
+
+                View.OnClickListener toggleListener = new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        toggleControls(true);
+                    }
+                };
+
+                videoLayoutOverlay.setOnClickListener(toggleListener);
+                if (videoView != null) {
+                    videoView.setOnClickListener(toggleListener);
+                }
 
                 if (playPauseBtn != null) {
                     int pauseIconId = getResources().getIdentifier("ic_pause", "drawable", pkg);
@@ -499,7 +614,15 @@ public class MediaViewActivity extends FragmentActivity {
         } catch(Exception e){}
 
         if (videoView != null) {
-            videoView.setVideoPath(filePath);
+            try {
+                videoView.setVideoPath(filePath);
+            } catch (Exception e) {
+                int pos = viewPager.getCurrentItem();
+                if (pos >= 0 && pos < activeList.size()) {
+                    videoView.setVideoURI(getItemContentUri(activeList.get(pos)));
+                }
+            }
+
             videoView.setOnPreparedListener(new MediaPlayer.OnPreparedListener() {
                 @Override
                 public void onPrepared(MediaPlayer mp) {
@@ -544,10 +667,6 @@ public class MediaViewActivity extends FragmentActivity {
                     @Override public void onStopTrackingTouch(SeekBar sb) { isTracking = false; }
                 });
             }
-
-            videoView.setOnClickListener(new View.OnClickListener() {
-                @Override public void onClick(View v) { toggleControls(true); }
-            });
         }
     }
 
@@ -677,15 +796,19 @@ public class MediaViewActivity extends FragmentActivity {
                     @Override public void onClick(View v) { toggleControls(true); }
                 });
 
-                android.media.MediaMetadataRetriever retriever = new android.media.MediaMetadataRetriever();
                 try {
-                    retriever.setDataSource(item.getPath());
-                    android.graphics.Bitmap bmp = retriever.getFrameAtTime(1000000, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
-                    if (bmp != null) photoView.setImageBitmap(bmp);
-                } catch(Exception e) {
+                    File videoFile = new File(item.getPath());
+                    Object loadTarget = videoFile.exists() ? videoFile : getItemContentUri(item);
+
+                    Glide.with(getApplicationContext())
+                            .load(loadTarget)
+                            .asBitmap()
+                            .encoder(new com.bumptech.glide.load.resource.bitmap.BitmapEncoder())
+                            .diskCacheStrategy(DiskCacheStrategy.RESULT)
+                            .dontAnimate()
+                            .into(photoView);
+                } catch (Exception ex) {
                     photoView.setImageResource(android.R.drawable.ic_menu_gallery);
-                } finally {
-                    try { retriever.release(); } catch(Exception ex) {}
                 }
             } else {
                 photoView.setZoomable(true);
@@ -701,7 +824,10 @@ public class MediaViewActivity extends FragmentActivity {
                 try {
                     Glide.with(getApplicationContext())
                             .load(item.getPath())
+                            .thumbnail(0.1f)
                             .diskCacheStrategy(DiskCacheStrategy.ALL)
+                            .skipMemoryCache(false)
+                            .dontAnimate()
                             .into(photoView);
                 } catch(Exception e){}
             }
