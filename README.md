@@ -10,4 +10,4 @@ A lightweight local gallery for Android.
 
 # APK
 
-In the **Releases** section
+In the **Releases** page.
