@@ -1,6 +1,6 @@
 # Nae Gallery
 
-A lightweight local gallery for Android.
+Simple local gallery for Android.
 
 # Tech Stack
 
