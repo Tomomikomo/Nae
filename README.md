@@ -6,7 +6,7 @@ A lightweight local gallery for Android.
 
 * **Languages:** Java & Kotlin
 * **Platform:** Android
-* **Development Environment:** Sketchware Pro (Add Source Directly / Custom Classes)
+* **Development Environment:** Sketchware Pro
 
 # APK
 
